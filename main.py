@@ -4,18 +4,20 @@ from datetime import datetime
 from flask import Flask, Response, request, json
 from flask_sqlalchemy import SQLAlchemy
 from flask_serialize import FlaskSerialize
+from sqlalchemy.sql import func
 
-# AUTH_KEY = os.environ["AUTH_KEY"]
-AUTH_KEY = "secret"
+AUTH_KEY = os.environ.get("AUTH_KEY", "secret")
 DB_NAME = "database.db"
+
 app = Flask(__name__)
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_NAME}"
 db = SQLAlchemy(app)
 fs_mixin = FlaskSerialize(db)
 
 
-def get_datetime_now_with_timezone() -> datetime:
-    return datetime.now(pytz.timezone("Europe/Warsaw"))
+def _db_create_all():
+    if "database.db" not in os.listdir():
+        db.create_all()
 
 
 def auth(params) -> bool:
@@ -27,18 +29,21 @@ class SensorData(db.Model, fs_mixin):
 
     id = db.Column(db.Integer, primary_key=True)
     temp = db.Column(db.Float, nullable=False)
+    vcc = db.Column(db.Integer, nullable=False)
     timestamp = db.Column(
         db.DateTime(timezone=True),
-        default=get_datetime_now_with_timezone,
+        default=func.utcnow,
         nullable=False,
     )
 
     def __repr__(self):
-        return f"<SensorData #{self.id}, {self.temp}, {self.timestamp.strftime('%Y/%m/%d %H:%M:%S')}>"
+        return f"<SensorData #{self.id}, {self.temp}, {self.vcc}, {self.timestamp.strftime('%Y/%m/%d %H:%M:%S')}>"
 
     def __fs_verify__(self, create=False):
-        if not getattr(self, "temp", False):
+        if not getattr(self, "temp", None):
             raise AttributeError("Missing temp value")
+        if not getattr(self, "vcc", None):
+            raise AttributeError("Missing vcc value")
         return True
 
 
@@ -54,25 +59,26 @@ def get_data():
 
 
 @app.route("/upload", methods=["POST"])
-def send_data():
-    if auth(request.args):
-        if request.headers.get("Content-Type") == "application/json":
-            try:
-                new_item = SensorData.fs_request_create_form()
-            except AttributeError as e:
-                post_error_msg = {"msg": f"Error: {str(e)}"}
-                return Response(
-                    json.dumps(post_error_msg), status=500, mimetype="application/json"
-                )
-            else:
-                return new_item.fs_as_json
-
-        wrong_content_type_msg = {"msg": "Content-type not supported. json only"}
+def sensor_data():
+    if not auth(request.args):
         return Response(
-            json.dumps(wrong_content_type_msg), status=400, mimetype="application/json"
+            json.dumps({"msg": "Unauthorized"}), status=401, mimetype="application/json"
         )
 
-    unauthorized_msg = {"msg": "Unauthorized"}
+    if request.headers.get("Content-Type") == "application/json":
+        try:
+            new_item = SensorData.fs_request_create_form()
+        except AttributeError as e:
+            return Response(
+                json.dumps({"msg": f"Error: {str(e)}"}),
+                status=500,
+                mimetype="application/json",
+            )
+        else:
+            return new_item.fs_as_json
+
     return Response(
-        json.dumps(unauthorized_msg), status=401, mimetype="application/json"
+        json.dumps({"msg": "Content-type not supported. json only"}),
+        status=400,
+        mimetype="application/json",
     )
