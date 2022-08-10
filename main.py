@@ -1,6 +1,4 @@
 import os
-import pytz
-from datetime import datetime
 from flask import Flask, Response, request, json
 from flask_sqlalchemy import SQLAlchemy
 from flask_serialize import FlaskSerialize
@@ -29,7 +27,6 @@ class SensorData(db.Model, fs_mixin):
 
     id = db.Column(db.Integer, primary_key=True)
     temp = db.Column(db.Float, nullable=False)
-    vcc = db.Column(db.Integer, nullable=False)
     timestamp = db.Column(
         db.DateTime(timezone=True),
         default=func.utcnow,
@@ -37,20 +34,17 @@ class SensorData(db.Model, fs_mixin):
     )
 
     def __repr__(self):
-        return f"<SensorData #{self.id}, {self.temp}, {self.vcc}, {self.timestamp.strftime('%Y/%m/%d %H:%M:%S')}>"
+        return f"<SensorData #{self.id}, {self.temp}, {self.timestamp.strftime('%Y/%m/%d %H:%M:%S')}>"
 
     def __fs_verify__(self, create=False):
         if not getattr(self, "temp", None):
             raise AttributeError("Missing temp value")
-        if not getattr(self, "vcc", None):
-            raise AttributeError("Missing vcc value")
         return True
 
 
 @app.route("/", methods=["GET"])
 def home():
-    last = SensorData.query.first()
-    return SensorData.fs_json_get(last.id)
+    return SensorData.query.order_by(SensorData.timestamp.desc()).first().fs_as_json
 
 
 @app.route("/data", methods=["GET"])
