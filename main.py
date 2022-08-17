@@ -1,5 +1,6 @@
 import os
 from flask import Flask, Response, request, json
+from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_serialize import FlaskSerialize
 from sqlalchemy.sql import func
@@ -8,6 +9,7 @@ AUTH_KEY = os.environ.get("AUTH_KEY", "secret")
 DB_NAME = "database.db"
 
 app = Flask(__name__)
+CORS(app)
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_NAME}"
 db = SQLAlchemy(app)
 fs_mixin = FlaskSerialize(db)
@@ -23,7 +25,7 @@ def auth(params) -> bool:
 
 
 class SensorData(db.Model, fs_mixin):
-    __fs_order_by_field_desc__ = "timestamp"
+    __fs_order_by_field__ = "timestamp"
 
     id = db.Column(db.Integer, primary_key=True)
     temp = db.Column(db.Float, nullable=False)
