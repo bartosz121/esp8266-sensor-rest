@@ -1,5 +1,8 @@
+import functools
 import os
-from flask import Flask, Response, request, json
+import datetime as dt
+from typing import Dict, Any
+from flask import Flask, Response, request, json, abort, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_serialize import FlaskSerialize
@@ -15,6 +18,35 @@ db = SQLAlchemy(app)
 fs_mixin = FlaskSerialize(db)
 
 
+def get_query_params(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(params=request.args)
+
+    return wrapper
+
+
+def raise_http_exception_on_except(code=404, error_msg: str = None):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                result = func(*args, **kwargs)
+            except Exception as e:
+                nonlocal error_msg  # grab error msg from outer scope FIXME
+                if not error_msg:
+                    error_msg = f"Error: {str(e)}"
+                response = jsonify({"message": error_msg})
+                response.status_code = code
+                abort(response)
+            else:
+                return result
+
+        return wrapper
+
+    return decorator
+
+
 def _db_create_all():
     if "database.db" not in os.listdir():
         db.create_all()
@@ -22,6 +54,16 @@ def _db_create_all():
 
 def auth(params) -> bool:
     return params.get("auth_key", None) == AUTH_KEY
+
+
+@raise_http_exception_on_except(
+    code=400,
+    error_msg="Cant convert your paramter to python datetime. "
+    + "Please use utc timestamp in miliseconds for best results",
+)
+def js_timestamp_to_python_dt(js_timestamp: str):
+    timestamp = int(js_timestamp)
+    return dt.datetime.utcfromtimestamp(timestamp / 1000)
 
 
 class SensorData(db.Model, fs_mixin):
@@ -50,8 +92,26 @@ def home():
 
 
 @app.route("/data", methods=["GET"])
-def get_data():
-    return SensorData.fs_get_delete_put_post()
+@get_query_params
+def get_data(params: Dict[str, Any], *args, **kwargs):
+    """
+    By default without any query params return data from last 24h
+    `start` and `end` should be passed as utc timestamps in miliseconds
+    """
+    start = dt.datetime.utcnow() - dt.timedelta(days=1)
+    end = dt.datetime.utcnow()
+
+    if params.get("start"):
+        start = js_timestamp_to_python_dt(params["start"])
+
+    if params.get("end"):
+        end = js_timestamp_to_python_dt(params["end"])
+
+    items = SensorData.query.filter(
+        SensorData.timestamp >= start, SensorData.timestamp <= end
+    )
+
+    return SensorData.fs_json_list(items)
 
 
 @app.route("/upload", methods=["POST"])
