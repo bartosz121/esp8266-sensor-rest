@@ -1,12 +1,20 @@
+import datetime as dt
 import functools
 import os
-import datetime as dt
-from typing import Dict, Any, Tuple
-from flask import Flask, Response, request, json, abort, jsonify
+from logging.config import dictConfig
+from typing import Any, Dict, Tuple
+
+from flask import Flask, Response, json, jsonify, request
+from flask.wrappers import Response
 from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
 from flask_serialize import FlaskSerialize
+from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.sql import func
+
+
+class TimestampConversionError(Exception):
+    pass
+
 
 AUTH_KEY = os.environ.get("AUTH_KEY", "secret")
 DB_NAME = "database.db"
@@ -15,6 +23,27 @@ OP_MAP = {
     "max": func.max,
     "min": func.min,
 }
+
+dictConfig(
+    {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "format": "[%(asctime)s] [%(process)d] [%(levelname)s] in %(module)s: %(message)s",
+                "datefmt": "%Y-%m-%d %H:%M:%S %z",
+            }
+        },
+        "handlers": {
+            "wsgi": {
+                "class": "logging.StreamHandler",
+                "stream": "ext://flask.logging.wsgi_errors_stream",
+                "formatter": "default",
+            }
+        },
+        "root": {"level": "DEBUG", "handlers": ["wsgi"]},
+    }
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -31,27 +60,6 @@ def get_query_params(func):
     return wrapper
 
 
-def raise_http_exception_on_except(code=404, error_msg: str = None):
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            try:
-                result = func(*args, **kwargs)
-            except Exception as e:
-                nonlocal error_msg  # grab error msg from outer scope FIXME
-                if not error_msg:
-                    error_msg = f"Error: {str(e)}"
-                response = jsonify({"message": error_msg})
-                response.status_code = code
-                abort(response)
-            else:
-                return result
-
-        return wrapper
-
-    return decorator
-
-
 def _db_create_all():
     if "database.db" not in os.listdir():
         db.create_all()
@@ -61,14 +69,25 @@ def auth(params) -> bool:
     return params.get("auth_key", None) == AUTH_KEY
 
 
-@raise_http_exception_on_except(
-    code=400,
-    error_msg="Cant convert your paramter to python datetime. "
-    + "Please use utc timestamp in miliseconds for best results",
-)
 def js_timestamp_to_python_dt(js_timestamp: str):
     timestamp = int(js_timestamp)
     return dt.datetime.utcfromtimestamp(timestamp / 1000)
+
+
+def get_dates_from_params(params: Dict[str, Any]) -> Tuple[dt.datetime, dt.datetime]:
+    """
+    To be used in routes, gets start and end date from request params or default -> 1 day from request time
+    """
+    start = dt.datetime.utcnow() - dt.timedelta(days=1)
+    end = dt.datetime.utcnow()
+
+    if params.get("start"):
+        start = js_timestamp_to_python_dt(params["start"])
+
+    if params.get("end"):
+        end = js_timestamp_to_python_dt(params["end"])
+
+    return start, end
 
 
 def get_dates_from_params(params: Dict[str, Any]) -> Tuple[dt.datetime, dt.datetime]:
@@ -107,9 +126,36 @@ class SensorData(db.Model, fs_mixin):
         return True
 
 
+#################################################################################################################
+
+
+@app.after_request
+def after_request_logging(response: Response):
+    app.logger.debug(f"Response: {response}")
+    app.logger.debug(f"Json: {response.json}")
+    return response
+
+
+@app.errorhandler(TimestampConversionError)
+def handle_timestamp_error(e: Exception):
+    return (
+        jsonify(
+            {
+                "message": "Cant convert your paramter to python datetime. Please use utc timestamp in miliseconds for best results"
+            }
+        ),
+        400,
+    )
+
+
 @app.route("/", methods=["GET"])
 def home():
     return SensorData.query.order_by(SensorData.timestamp.desc()).first().fs_as_json
+
+
+@app.route("/health", methods=["GET"])
+def healthcheck():
+    return jsonify({"status": "ok"})
 
 
 @app.route("/data", methods=["GET"])
@@ -135,13 +181,14 @@ def get_data_average(params: Dict[str, Any], *args, **kwargs):
     op_param = params.get("operation", None)
 
     if op_param not in OP_MAP.keys():
-        response = jsonify(
-            {
-                "message": "'operation' not found in query params. Supported operations: 'avg', 'min', 'max'"
-            }
+        return (
+            jsonify(
+                {
+                    "message": "'operation' not found in query params. Supported operations: 'avg', 'min', 'max'"
+                }
+            ),
+            400,
         )
-        response.status_code = 400
-        abort(response)
 
     f = OP_MAP[op_param]
 
